@@ -1,0 +1,295 @@
+#include <Servo.h>
+
+// =====================================================
+// MOTOR MAPPING
+// =====================================================
+
+Servo motor1;
+Servo motor2;
+Servo motor3;
+Servo motor4;
+Servo motor5;   // MG90S wrist
+Servo mast;
+
+const uint8_t MOTOR1_PIN = 2;   // MG996R
+const uint8_t MOTOR2_PIN = 3;   // MG996R
+const uint8_t MOTOR3_PIN = 4;   // MG996R
+const uint8_t MOTOR4_PIN = 5;   // MG996R
+
+// Pin 6 unused
+
+const uint8_t MOTOR5_PIN = 7;   // MG90S wrist
+const uint8_t MAST_PIN   = 8;
+
+
+// =====================================================
+// GRIPPER
+// Waveshare / ST3215 on TX pin 1
+// =====================================================
+
+const byte TORQUE_ON[] = {
+  0xFF, 0xFF, 0xFE, 0x04, 0x03, 0x28, 0x01, 0xD1
+};
+
+const byte GRIPPER_OPEN[] = {
+  0xFF, 0xFF, 0xFE, 0x0A, 0x03, 0x29, 0x32,
+  0xD0, 0x07, 0x00, 0x00, 0xDC, 0x05, 0xE1
+};
+
+const byte GRIPPER_CLOSE[] = {
+  0xFF, 0xFF, 0xFE, 0x0A, 0x03, 0x29, 0x32,
+  0xFF, 0x0F, 0x00, 0x00, 0xDC, 0x05, 0xAA
+};
+
+
+// =====================================================
+// SERIAL INPUT BUFFER
+// =====================================================
+
+char commandBuffer[24];
+uint8_t commandIndex = 0;
+
+
+// =====================================================
+// MAST STATE
+// Makes mast movement NON-BLOCKING
+// =====================================================
+
+bool mastMoving = false;
+unsigned long mastStopTime = 0;
+
+
+// =====================================================
+// GRIPPER
+// =====================================================
+
+void sendPacket(const byte *packet, int length) {
+  Serial.write(packet, length);
+}
+
+void openGripper() {
+  sendPacket(TORQUE_ON, sizeof(TORQUE_ON));
+  sendPacket(GRIPPER_OPEN, sizeof(GRIPPER_OPEN));
+}
+
+void closeGripper() {
+  sendPacket(TORQUE_ON, sizeof(TORQUE_ON));
+  sendPacket(GRIPPER_CLOSE, sizeof(GRIPPER_CLOSE));
+}
+
+
+// =====================================================
+// MAST
+// =====================================================
+
+void startMast(int direction, unsigned long duration) {
+
+  if (!mast.attached()) {
+    mast.attach(MAST_PIN);
+  }
+
+  if (direction > 0) {
+    mast.writeMicroseconds(2000);
+  }
+  else {
+    mast.writeMicroseconds(1000);
+  }
+
+  mastStopTime = millis() + duration;
+  mastMoving = true;
+}
+
+
+void updateMast() {
+
+  if (!mastMoving) {
+    return;
+  }
+
+  // Safe millis overflow comparison
+  if ((long)(millis() - mastStopTime) >= 0) {
+
+    mast.writeMicroseconds(1500);
+
+    mastMoving = false;
+  }
+}
+
+
+// =====================================================
+// MOTOR COMMAND
+// =====================================================
+
+void moveMotor(int motorNumber, int angle) {
+
+  angle = constrain(angle, 0, 180);
+
+  switch (motorNumber) {
+
+    case 1:
+      motor1.write(angle);
+      break;
+
+    case 2:
+      motor2.write(angle);
+      break;
+
+    case 3:
+      motor3.write(angle);
+      break;
+
+    case 4:
+      motor4.write(angle);
+      break;
+
+    case 5:
+      motor5.write(angle);
+      break;
+  }
+}
+
+
+// =====================================================
+// COMMAND PARSER
+// =====================================================
+
+void processCommand(char *cmd) {
+
+  // -------------------------
+  // GRIPPER
+  // -------------------------
+
+  if (cmd[0] == 'o' && cmd[1] == '\0') {
+    openGripper();
+    return;
+  }
+
+  if (cmd[0] == 'c' && cmd[1] == '\0') {
+    closeGripper();
+    return;
+  }
+
+
+  // -------------------------
+  // Find decimal separator
+  // -------------------------
+
+  char *dot = strchr(cmd, '.');
+
+  if (dot == NULL) {
+    return;
+  }
+
+  *dot = '\0';
+
+  char *valueText = dot + 1;
+
+
+  // -------------------------
+  // MAST
+  // f.222
+  // b.222
+  // -------------------------
+
+  if (cmd[0] == 'f' && cmd[1] == '\0') {
+
+    unsigned long duration = atol(valueText);
+
+    if (duration > 0) {
+      startMast(1, duration);
+    }
+
+    return;
+  }
+
+  if (cmd[0] == 'b' && cmd[1] == '\0') {
+
+    unsigned long duration = atol(valueText);
+
+    if (duration > 0) {
+      startMast(-1, duration);
+    }
+
+    return;
+  }
+
+
+  // -------------------------
+  // ARM
+  // 1.55
+  // 2.100
+  // etc.
+  // -------------------------
+
+  int motorNumber = atoi(cmd);
+  int angle = atoi(valueText);
+
+  if (motorNumber >= 1 && motorNumber <= 5) {
+    moveMotor(motorNumber, angle);
+  }
+}
+
+
+// =====================================================
+// SERIAL READER
+// =====================================================
+
+void readSerial() {
+
+  while (Serial.available() > 0) {
+
+    char incoming = Serial.read();
+
+    if (incoming == '\n' || incoming == '\r') {
+
+      if (commandIndex > 0) {
+
+        commandBuffer[commandIndex] = '\0';
+
+        processCommand(commandBuffer);
+
+        commandIndex = 0;
+      }
+    }
+
+    else if (commandIndex < sizeof(commandBuffer) - 1) {
+
+      commandBuffer[commandIndex++] = incoming;
+    }
+  }
+}
+
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup() {
+
+  Serial.begin(1000000);
+
+  motor1.attach(MOTOR1_PIN);
+  motor2.attach(MOTOR2_PIN);
+  motor3.attach(MOTOR3_PIN);
+  motor4.attach(MOTOR4_PIN);
+  motor5.attach(MOTOR5_PIN);
+
+  motor1.write(90);
+  motor2.write(90);
+  motor3.write(90);
+  motor4.write(90);
+  motor5.write(90);
+}
+
+
+// =====================================================
+// MAIN LOOP
+// =====================================================
+
+void loop() {
+
+  readSerial();
+
+  updateMast();
+
+}
